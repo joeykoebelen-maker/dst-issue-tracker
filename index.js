@@ -68,41 +68,88 @@ async function getChatName(chatId) {
   }
 }
 
+// Add bot to a chat
+async function addBotToChat(chatId) {
+  try {
+    const token = await getTenantToken();
+    const res = await axios.post(
+      `https://open.larksuite.com/open-apis/im/v1/chats/${chatId}/members`,
+      {
+        member_id_type: 'app_id',
+        id_list: [LARK_APP_ID]
+      },
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
+    );
+    return { chatId, success: true, data: res.data };
+  } catch (e) {
+    return { chatId, success: false, error: e.response?.data || e.message };
+  }
+}
+
+// List all chats the bot is in
+async function listBotChats() {
+  try {
+    const token = await getTenantToken();
+    const res = await axios.get('https://open.larksuite.com/open-apis/im/v1/chats?page_size=50', {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    return res.data.data?.items || [];
+  } catch (e) {
+    return [];
+  }
+}
+
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+
+// Setup - add bot to monitored chats by chat_id
+app.post('/setup/join', async (req, res) => {
+  const { chat_ids } = req.body;
+  if (!chat_ids || !Array.isArray(chat_ids)) {
+    return res.status(400).json({ error: 'Provide chat_ids array in body' });
+  }
+  const results = [];
+  for (const chatId of chat_ids) {
+    const result = await addBotToChat(chatId);
+    results.push(result);
+  }
+  res.json({ results });
+});
+
+// Get bot's current chats
+app.get('/setup/chats', async (req, res) => {
+  try {
+    const chats = await listBotChats();
+    res.json({ chats });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Lark webhook
 app.post('/webhook/lark/events', async (req, res) => {
   const body = req.body;
-
   // Handle Lark challenge verification
   if (body.challenge) {
     return res.json({ challenge: body.challenge });
   }
-
   try {
     const event = body.event;
     if (!event || !event.message) return res.json({ code: 0 });
-
     const msg = event.message;
     const chatId = msg.chat_id;
     const sender = event.sender?.sender_id?.user_id || 'unknown';
     const text = msg.content ? JSON.parse(msg.content).text || '' : '';
     const ts = msg.create_time || Date.now().toString();
-
     const chatName = await getChatName(chatId);
-
     // Only process monitored chats
     const isMonitored = MONITORED_CHATS.some(c => chatName.includes(c) || c.includes(chatName));
     if (!isMonitored) return res.json({ code: 0 });
-
     // Log to Messages sheet
     await appendRow('Messages', [chatName, text, sender, ts, JSON.stringify(body)]);
-
     // Check if this looks like a new issue (questions or problem keywords)
     const issueKeywords = ['issue', 'problem', 'error', 'help', 'broken', 'not working', 'fix', '?'];
     const isIssue = issueKeywords.some(k => text.toLowerCase().includes(k));
-
     if (isIssue) {
       const issueId = `ISS-${Date.now()}`;
       const now = new Date().toISOString();
@@ -114,7 +161,6 @@ app.post('/webhook/lark/events', async (req, res) => {
   } catch (err) {
     console.error('Webhook error:', err.message);
   }
-
   res.json({ code: 0 });
 });
 
